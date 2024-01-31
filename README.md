@@ -27,3 +27,11 @@ This script is for creating a private link for application gateway in a resource
 ```console
 $ ./1000pe-appgw -s <subscription-id> -g <resource-group>
 ```
+
+**Note:** When using this script, please be aware of the subscription limits on a per-region basis. If you encounter the error message "Cannot create more than 1000 virtual networks for this subscription in this region.", it means you have reached the limit.
+
+```console
+(VnetCountLimitReached) Cannot create more than 1000 virtual networks for this subscription in this region.
+Code: VnetCountLimitReached
+Message: Cannot create more than 1000 virtual networks for this subscription in this region.
+```
