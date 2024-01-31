@@ -1,0 +1,416 @@
+#!/bin/bash
+set -u
+
+# This script is for creating a private link for application gateway in a resource group and for creating 1000 private endpoints and vnet in a resource group.
+# 1. Create resource group
+# 2. Create vnet and subnet
+# 3. Create Application Gateway
+# 4. Create private link from the application gateway
+# 5. Set 8 private ipaddress of application gateway praivate link config
+# 6. Create another resource group
+# 7. Create 1000 vnet and private endpoint
+# 5. Delete all resource groups
+
+SUFFIX=$(date '+%Y%m%d%H%M%S')
+RESOURCE_GROUP="1000pe-appgw"$SUFFIX
+LOCATION="japaneast"
+SUBSCRIPTION=
+
+echo RESOURCE_GROUP=$RESOURCE_GROUP
+echo LOCATION=$LOCATION
+echo SUBSCRIPTION=$SUBSCRIPTION
+
+function error_exit() {
+  echo "$1" 1>&2
+  exit 1
+}
+
+# requre az cli
+if ! type az > /dev/null 2>&1; then
+  error_exit "az cli is not installed"
+fi
+
+# # require subscription contribute role
+# if ! az role definition list --name "Subscription Contributor" > /dev/null 2>&1; then
+#   error_exit "You need to grant Subscription Contributor role to your account"
+# fi
+# # require application gateway contribute role
+# if ! az role definition list --name "Application Gateway Contributor" > /dev/null 2>&1; then
+#   error_exit "You need to grant Application Gateway Contributor role to your account"
+# fi
+# # require resource group contribute role
+# if ! az role definition list --name "Contributor" > /dev/null 2>&1; then
+#   error_exit "You need to grant Contributor role to your account"
+# fi
+# # require network contribute role
+# if ! az role definition list --name "Network Contributor" > /dev/null 2>&1; then
+#   error_exit "You need to grant Network Contributor role to your account"
+# fi
+
+function usage () {
+    echo "Usage: $0 -s <subscription-id> -g <resource-group>"
+    exit 1
+}
+
+while getopts s: OPT
+do
+    case $OPT in
+        s) SUBSCRIPTION=$OPTARG
+            ;;
+        *) usage
+            ;;
+    esac
+done
+
+# requre subscription
+if [ -z "$SUBSCRIPTION" ]; then
+  error_exit "SUBSCRIPTION is not set"
+fi
+
+echo ""
+echo "0. Set subscription"
+echo "az account set --subscription $SUBSCRIPTION"
+echo "---------------------------------------------------"
+echo ""
+
+az account set --subscription $SUBSCRIPTION
+
+if [ $? -ne 0 ]; then
+  error_exit "az account set --subscription $SUBSCRIPTION"
+fi
+
+echo ""
+echo "az login"
+echo "---------------------------------------------------"
+echo ""
+
+az login
+
+if [ $? -ne 0 ]; then
+  error_exit "az login"
+fi
+
+# Create resouece group and vnet and application gateway and private link
+echo ""
+echo "1. Create Resource Group"
+echo "az group create --name $RESOURCE_GROUP --location $LOCATION"
+echo "---------------------------------------------------"
+echo ""
+
+az group create \
+  --name $RESOURCE_GROUP \
+  --location $LOCATION
+
+if [ $? -ne 0 ]; then
+  error_exit "az group create --name $RESOURCE_GROUP --location $LOCATION"
+fi
+
+echo ""
+echo "2. Create vnet and subnet"
+echo "az network vnet create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-vnet --address-prefixes 10.0.0.0/16 --subnet-name $RESOURCE_GROUP-subnet --subnet-prefixes 10.0.0.0/24"
+echo "---------------------------------------------------"
+echo ""
+
+# ref https://learn.microsoft.com/ja-jp/azure/application-gateway/private-link-configure?tabs=cli#configuration-options
+az network vnet create \
+  --resource-group $RESOURCE_GROUP \
+  --name $RESOURCE_GROUP-vnet \
+  --address-prefixes 10.0.0.0/16 \
+  --subnet-name $RESOURCE_GROUP-subnet \
+  --subnet-prefixes 10.0.0.0/24
+
+if [ $? -ne 0 ]; then
+  error_exit "az network vnet create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-vnet 10.0.0.0/16 --subnet-name $RESOURCE_GROUP-subnet --subnet-prefixes 10.0.0.0/24"
+fi
+
+echo "az network vnet subnet create --resource-group $RESOURCE_GROUP --vnet-name $RESOURCE_GROUP-vnet --name PrivateLinkDefaultSubnet --address-prefixes 10.0.1./24 --disable-private-link-service-network-policies true"
+echo "---------------------------------------------------"
+echo ""
+
+az network vnet subnet create \
+  --resource-group $RESOURCE_GROUP \
+  --vnet-name $RESOURCE_GROUP-vnet \
+  --name PrivateLinkDefaultSubnet \
+  --address-prefixes 10.0.1.0/24 \
+  --disable-private-link-service-network-policies true
+
+if [ $? -ne 0 ]; then
+  error_exit "az network vnet subnet create --resource-group $RESOURCE_GROUP --vnet-name $RESOURCE_GROUP-vnet --name PrivateLinkDefaultSubnet --address-prefixes 10.0.1.0/24 --disable-private-link-service-network-policies true"
+fi
+
+echo "az network public-ip create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-pip --sku Standard --allocation-method Static"
+echo "---------------------------------------------------"
+echo ""
+
+az network public-ip create \
+  --resource-group $RESOURCE_GROUP \
+  --name $RESOURCE_GROUP-pip \
+  --sku Standard \
+  --allocation-method Static
+
+if [ $? -ne 0 ]; then
+  error_exit "az network public-ip create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-pip --sku Standard --allocation-method Static"
+fi
+
+echo ""
+echo "3. Create waf policy"
+echo "az network application-gateway waf-policy create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-waf"
+echo "---------------------------------------------------"
+
+az network application-gateway waf-policy create \
+  --resource-group $RESOURCE_GROUP \
+  --name $RESOURCE_GROUP-waf
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway waf-policy create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-waf"
+fi
+
+echo ""
+echo "4. Create application gateway"
+echo "az network application-gateway create \
+  --resource-group $RESOURCE_GROUP \
+  --name $RESOURCE_GROUP-appgw \
+  --vnet-name $RESOURCE_GROUP-vnet \
+  --subnet $RESOURCE_GROUP-subnet \
+  --capacity 2 \
+  --sku WAF_v2 \
+  --waf-policy $RESOURCE_GROUP-waf \
+  --http-settings-cookie-based-affinity Disabled \
+  --frontend-port 80 \
+  --http-settings-port 80 \
+  --http-settings-protocol Http \
+  --routing-rule-type Basic \
+  --servers koudaiii.com \
+  --private-ip-address 10.0.0.200 \
+  --priority 100 \
+  --public-ip-address $RESOURCE_GROUP-pip"
+echo "---------------------------------------------------"
+echo ""
+
+az network application-gateway create \
+  --resource-group $RESOURCE_GROUP \
+  --name $RESOURCE_GROUP-appgw \
+  --vnet-name $RESOURCE_GROUP-vnet \
+  --subnet $RESOURCE_GROUP-subnet \
+  --capacity 2 \
+  --sku WAF_v2 \
+  --waf-policy $RESOURCE_GROUP-waf \
+  --http-settings-cookie-based-affinity Disabled \
+  --frontend-port 80 \
+  --http-settings-port 80 \
+  --http-settings-protocol Http \
+  --routing-rule-type Basic \
+  --servers koudaiii.com \
+  --private-ip-address 10.0.0.200 \
+  --priority 100 \
+  --public-ip-address $RESOURCE_GROUP-pip
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway create --resource-group $RESOURCE_GROUP --name $RESOURCE_GROUP-appgw --vnet-name $RESOURCE_GROUP-vnet --subnet $RESOURCE_GROUP-subnet --capacity 2 --sku WAF_v2 --waf-policy $RESOURCE_GROUP-waf --http-settings-cookie-based-affinity Disabled --frontend-port 80 --http-settings-port 80 --http-settings-protocol Http --routing-rule-type Basic --servers koudaiii.com --private-ip-address 10.0.0.200 --priority 100 --public-ip-address $RESOURCE_GROUP-pip"
+fi
+
+# Update application gateway about host-name-from-backend-pool
+echo ""
+echo "5. Update application gateway about host-name-from-backend-pool"
+echo "az network application-gateway http-settings update \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayBackendHttpSettings \
+  --host-name-from-backend-pool true"
+echo "---------------------------------------------------"
+
+az network application-gateway http-settings update \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayBackendHttpSettings \
+  --host-name-from-backend-pool true
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway http-settings update --resource-group $RESOURCE_GROUP --gateway-name $RESOURCE_GROUP-appgw --name appGatewayBackendHttpSettings --host-name-from-backend-pool true"
+fi
+
+# Add Application gateway http-settings
+echo ""
+echo "6. Add Application gateway http-settings"
+echo "az network application-gateway http-settings create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayPrivateBackendHttpSettings \
+  --host-name-from-backend-pool true \
+  --port 80 \
+  --protocol Http \
+  --cookie-based-affinity Disabled"
+echo "---------------------------------------------------"
+
+az network application-gateway http-settings create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayPrivateBackendHttpSettings \
+  --host-name-from-backend-pool true \
+  --port 80 \
+  --protocol Http \
+  --cookie-based-affinity Disabled
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway http-settings create --resource-group $RESOURCE_GROUP --gateway-name $RESOURCE_GROUP-appgw --name appGatewayPrivateBackendHttpSettings --host-name-from-backend-pool true --port 80 --protocol Http --cookie-based-affinity Disabled"
+fi
+
+# Add frontend port for Application gateway
+# https://github.com/Azure/azure-cli/issues/16567#issuecomment-761952953
+echo ""
+echo "7. Add frontend port for Application gateway"
+echo "az network application-gateway frontend-port create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayFrontendPort \
+  --port 8081"
+echo "---------------------------------------------------"
+
+az network application-gateway frontend-port create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayFrontendPort \
+  --port 8081
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway frontend-port create --resource-group $RESOURCE_GROUP --gateway-name $RESOURCE_GROUP-appgw --name appGatewayFrontendPort --port 80"
+fi
+
+# add application gateway http-listener
+echo ""
+echo "8. Update application gateway about http-listener"
+echo "az network application-gateway http-listener create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayPrivateHttpListener \
+  --frontend-ip appGatewayPrivateFrontendIP \
+  --frontend-port appGatewayFrontendPort"
+echo "---------------------------------------------------"
+
+az network application-gateway http-listener create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayPrivateHttpListener \
+  --frontend-ip appGatewayPrivateFrontendIP \
+  --frontend-port appGatewayFrontendPort
+
+  if [ $? -ne 0 ]; then
+    error_exit "az network application-gateway http-listener create --resource-group $RESOURCE_GROUP --gateway-name $RESOURCE_GROUP-appgw --name appGatewayPrivateFrontendIP --frontend-ip appGatewayPrivateFrontendIP --frontend-port appGatewayFrontendPort --host-name-from-backend-pool true"
+  fi
+
+# add rule for private
+echo ""
+echo "9. Create Application Gateway about rule"
+echo "az network application-gateway rule create \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --http-listener appGatewayPrivateHttpListener \
+  --name appGatewayRule \
+  --resource-group $RESOURCE_GROUP \
+  --address-pool appGatewayBackendPool \
+  --http-settings appGatewayBackendHttpSettings \
+  --rule-type Basic \
+  --priority 200"
+echo "---------------------------------------------------"
+
+az network application-gateway rule create \
+  --resource-group $RESOURCE_GROUP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appGatewayRule \
+  --http-listener appGatewayPrivateHttpListener \
+  --address-pool appGatewayBackendPool \
+  --http-settings appGatewayBackendHttpSettings \
+  --rule-type Basic \
+  --priority 200
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway rule create --resource-group $RESOURCE_GROUP --gateway-name $RESOURCE_GROUP-appgw --name appGatewayRule --http-listener appGatewayPrivateFrontendIP --address-pool appGatewayBackendPool --http-settings appGatewayBackendHttpSettings --rule-type Basic --priority 200 --address-pool appGatewayPrivateBackendPool --http-settings appGatewayPrivateBackendHttpSettings"
+fi
+
+# Create private link for application gateway
+echo ""
+echo "10. Create private link for application gateway"
+echo "az network application-gateway private-link add --frontend-ip appGatewayPrivateFrontendIP --gateway-name $RESOURCE_GROUP-appgw --name appgw-private-link --resource-group $RESOURCE_GROUP --subnet $RESOURCE_GROUP-subnet"
+echo "---------------------------------------------------"
+echo ""
+
+az network application-gateway private-link add \
+  --frontend-ip appGatewayPrivateFrontendIP \
+  --gateway-name $RESOURCE_GROUP-appgw \
+  --name appgw-private-link \
+  --resource-group $RESOURCE_GROUP \
+  --subnet PrivateLinkDefaultSubnet
+
+if [ $? -ne 0 ]; then
+  error_exit "az network application-gateway private-link add --frontend-ip appGatewayPrivateFrontendIP --gateway-name $RESOURCE_GROUP-appgw --name appgw-private-link --resource-group $RESOURCE_GROUP --subnet $RESOURCE_GROUP-subnet"
+fi
+
+# Add private ip for private link(until totale 8)
+echo ""
+echo "11. Create private ip for private link"
+for i in {2..8}; do
+  echo "az network application-gateway private-link ip-config add -n PrivateLinkDefaultIPConfiguration -g $RESOURCE_GROUP  --gateway-name $RESOURCE_GROUP-appgw --private-link appgw-private-link"
+  echo "---------------------------------------------------"
+  az network application-gateway private-link ip-config add -n PrivateLinkDefaultIPConfiguration -g $RESOURCE_GROUP  --gateway-name $RESOURCE_GROUP-appgw --private-link appgw-private-link
+
+  if [ $? -ne 0 ]; then
+    error_exit "az network application-gateway private-link ip-config add -n PrivateLinkDefaultIPConfiguration -g $RESOURCE_GROUP  --gateway-name $RESOURCE_GROUP-appgw --private-link appgw-private-link"
+  fi
+done
+
+# Create resource group
+echo "Create Resource Group"
+echo "az group create --name $RESOURCE_GROUP-pe --location $LOCATION"
+echo "---------------------------------------------------"
+echo ""
+
+az group create \
+  --name $RESOURCE_GROUP-pe \
+  --location $LOCATION
+
+if [ $? -ne 0 ]; then
+  error_exit "az group create --name $RESOURCE_GROUP-pe --location $LOCATION"
+fi
+# Create resource group and vnet and private endpoint
+for i in {1..1000}; do
+
+  echo ""
+  echo "1. Create vnet and subnet"
+  echo "az network vnet create --resource-group $RESOURCE_GROUP-pe --name vnet$i --address-prefixes 10.0.0.0/16 --subnet-name subnet$i --subnet-prefixes 10.0.0.0/24 --disable-private-endpoint-network-policies true"
+  echo "---------------------------------------------------"
+  echo ""
+
+  az network vnet create \
+    --resource-group $RESOURCE_GROUP-pe \
+    --name vnet$i \
+    --address-prefixes 10.0.0.0/16 \
+    --subnet-name subnet$i \
+    --subnet-prefixes 10.0.0.0/24
+
+  if [ $? -ne 0 ]; then
+    error_exit "az network vnet create --resource-group $RESOURCE_GROUP-pe --name vnet$i --address-prefixes 10.0.0.0/16 --subnet-name subnet$i --subnet-prefixes 10.0.0.0/24 --disable-private-endpoint-network-policies true"
+  fi
+
+  echo ""
+  echo "2. Create private endpoint from vnet to application gateway"
+  echo "az network private-endpoint create --resource-group $RESOURCE_GROUP-pe --name private-endpoint --vnet-name vnet$i --subnet subnet$i --private-connection-resource-id /subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/applicationGateways/$RESOURCE_GROUP-appgw --group-id appGatewayPrivateFrontendIP --connection-name connection$i"
+  echo "---------------------------------------------------"
+  echo ""
+
+  az network private-endpoint create \
+    --resource-group $RESOURCE_GROUP-pe \
+    --name private-endpoint$i \
+    --vnet-name vnet$i \
+    --subnet subnet$i \
+    --private-connection-resource-id /subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/applicationGateways/$RESOURCE_GROUP-appgw \
+    --group-id appGatewayPrivateFrontendIP \
+    --connection-name connection$i
+
+  if [ $? -ne 0 ]; then
+    error_exit "az network private-endpoint create --resource-group $RESOURCE_GROUP-pe --name private-endpoint$i --vnet-name vnet$i --subnet subnet$i --private-connection-resource-id /subscriptions/$SUBSCRIPTION/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.Network/applicationGateways/$RESOURCE_GROUP-appgw --group-id appGatewayPrivateFrontendIP --connection-name connection$i"
+  fi
+done
+
+echo ""
+echo "Complete!!"
+echo "---------------------------------------------------"
+echo "az group list | grep 1000pe-appgw | awk '{print \$1}' | parallel az group delete --resource-group {} --yes --no-wait"
